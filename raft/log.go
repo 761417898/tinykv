@@ -14,7 +14,12 @@
 
 package raft
 
-import pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
+import (
+	"github.com/pingcap-incubator/tinykv/log"
+	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
+	"github.com/pkg/errors"
+	"strconv"
+)
 
 // RaftLog manage the log entries, its struct look like:
 //
@@ -50,13 +55,41 @@ type RaftLog struct {
 	pendingSnapshot *pb.Snapshot
 
 	// Your Data Here (2A).
+	proposalEntries []*pb.Entry
 }
 
 // newLog returns log using the given storage. It recovers the log
 // to the state that it just commits and applies the latest snapshot.
 func newLog(storage Storage) *RaftLog {
 	// Your Code Here (2A).
-	return nil
+	rsp := &RaftLog{
+		storage:         storage,
+		committed:       0,
+		applied:         0,
+		stabled:         0,
+		entries:         []pb.Entry{},
+		pendingSnapshot: nil,
+	}
+	firstIdx, err := storage.FirstIndex()
+	if err != nil {
+		log.Fatal(err)
+		return nil
+	}
+	lastIdx, err := storage.LastIndex()
+	if err != nil {
+		log.Fatal(err)
+		return nil
+	}
+	initEntries, err := storage.Entries(firstIdx, lastIdx+1)
+	if err != nil {
+		log.Fatal(err)
+		return nil
+	}
+	rsp.entries = append(rsp.entries, initEntries...)
+	rsp.committed = rsp.LastIndex()
+	// rsp.applied = rsp.LastIndex()
+	rsp.stabled = rsp.LastIndex()
+	return rsp
 }
 
 // We need to compact the log entries in some point of time like
@@ -71,29 +104,62 @@ func (l *RaftLog) maybeCompact() {
 // note, this is one of the test stub functions you need to implement.
 func (l *RaftLog) allEntries() []pb.Entry {
 	// Your Code Here (2A).
-	return nil
+	rsp := []pb.Entry{}
+	for _, entry := range l.entries {
+		if entry.Data == nil {
+			//continue
+		}
+		rsp = append(rsp, entry)
+	}
+	return rsp
 }
 
 // unstableEntries return all the unstable entries
 func (l *RaftLog) unstableEntries() []pb.Entry {
 	// Your Code Here (2A).
-	return nil
+	if len(l.entries) == 0 {
+		return nil
+	}
+	if l.stabled < 0 || int(l.stabled) >= len(l.entries) {
+		return nil
+	}
+	return l.entries[l.stabled:len(l.entries)]
 }
 
 // nextEnts returns all the committed but not applied entries
 func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 	// Your Code Here (2A).
-	return nil
+	if !(l.applied+1 >= l.entries[0].Index && l.applied+1 <= l.entries[len(l.entries)-1].Index) {
+		return nil
+	}
+	if !(l.committed >= l.entries[0].Index && l.committed <= l.entries[len(l.entries)-1].Index) {
+		return nil
+	}
+	appliedArrayIndex := l.applied + 1 - l.entries[0].Index
+	committedArrayIndex := l.committed - l.entries[0].Index
+	return l.entries[appliedArrayIndex : committedArrayIndex+1]
 }
 
 // LastIndex return the last index of the log entries
 func (l *RaftLog) LastIndex() uint64 {
 	// Your Code Here (2A).
-	return 0
+	if len(l.entries) == 0 {
+		return 0
+	}
+	return l.entries[len(l.entries)-1].Index
 }
 
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	// Your Code Here (2A).
-	return 0, nil
+	if i == 0 {
+		return 1, nil
+	}
+	if len(l.entries) == 0 {
+		return 1, errors.New("entry id empty")
+	}
+	if !(i >= l.entries[0].Index && i <= l.entries[len(l.entries)-1].Index) {
+		return 1, errors.New("index" + strconv.Itoa(int(i)) + " out of range")
+	}
+	return l.entries[i-l.entries[0].Index].Term, nil
 }
