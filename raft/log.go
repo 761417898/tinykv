@@ -86,8 +86,6 @@ func newLog(storage Storage) *RaftLog {
 		return nil
 	}
 	rsp.entries = append(rsp.entries, initEntries...)
-	rsp.committed = rsp.LastIndex()
-	// rsp.applied = rsp.LastIndex()
 	rsp.stabled = rsp.LastIndex()
 	return rsp
 }
@@ -118,12 +116,12 @@ func (l *RaftLog) allEntries() []pb.Entry {
 func (l *RaftLog) unstableEntries() []pb.Entry {
 	// Your Code Here (2A).
 	if len(l.entries) == 0 {
-		return nil
+		return []pb.Entry{}
 	}
-	if l.stabled < 0 || int(l.stabled) >= len(l.entries) {
-		return nil
+	if !((l.stabled-l.entries[0].Index)+1 >= 0 && int((l.stabled-l.entries[0].Index)+1) < len(l.entries)) {
+		return []pb.Entry{}
 	}
-	return l.entries[l.stabled:len(l.entries)]
+	return l.entries[(l.stabled-l.entries[0].Index)+1:]
 }
 
 // nextEnts returns all the committed but not applied entries
