@@ -17,6 +17,7 @@ package raft
 import (
 	"errors"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
+	"go.uber.org/atomic"
 )
 
 // ErrStepLocalMsg is returned when try to step a local raft message
@@ -30,6 +31,13 @@ var ErrStepPeerNotFound = errors.New("raft: cannot step as peer not found")
 type SoftState struct {
 	Lead      uint64
 	RaftState StateType
+}
+
+func (ss *SoftState) compareSoftState(state *SoftState) bool {
+	if ss.Lead != state.Lead || ss.RaftState != state.RaftState {
+		return false
+	}
+	return true
 }
 
 // Ready encapsulates the entries and messages that are ready to read,
@@ -69,12 +77,27 @@ type Ready struct {
 type RawNode struct {
 	Raft *Raft
 	// Your Data Here (2A).
+	softState *SoftState
+	hardState *pb.HardState
+	readble   atomic.Bool
 }
 
 // NewRawNode returns a new RawNode given configuration and a list of raft peers.
 func NewRawNode(config *Config) (*RawNode, error) {
 	// Your Code Here (2A).
-	return &RawNode{newRaft(config)}, nil
+	ret := &RawNode{
+		Raft: newRaft(config),
+		softState: &SoftState{
+			Lead:      0,
+			RaftState: StateFollower,
+		},
+	}
+	ret.hardState = &pb.HardState{
+		Term:   ret.Raft.Term,
+		Vote:   ret.Raft.Vote,
+		Commit: ret.Raft.RaftLog.committed,
+	}
+	return ret, nil
 }
 
 // Tick advances the internal logical clock by a single tick.
@@ -143,24 +166,39 @@ func (rn *RawNode) Step(m pb.Message) error {
 func (rn *RawNode) Ready() Ready {
 	// Your Code Here (2A).
 	ret := Ready{
-		SoftState: nil,
-		/*HardState: pb.HardState{
+		SoftState: &SoftState{
+			Lead:      rn.Raft.Lead,
+			RaftState: rn.Raft.State,
+		},
+		HardState: pb.HardState{
 			Term:   rn.Raft.Term,
 			Vote:   rn.Raft.Vote,
 			Commit: rn.Raft.RaftLog.committed,
-		},*/
-		HardState: pb.HardState{
-			Term:   0,
-			Vote:   0,
-			Commit: 0,
 		},
 		Entries:          rn.Raft.RaftLog.unstableEntries(),
 		Snapshot:         pb.Snapshot{},
 		CommittedEntries: nil,
 		Messages:         nil,
 	}
+	if rn.softState.compareSoftState(ret.SoftState) {
+		ret.SoftState = nil
+	}
+	if rn.hardState.Term == ret.HardState.Term &&
+		rn.hardState.Vote == ret.HardState.Vote &&
+		rn.hardState.Commit == ret.HardState.Commit {
+		ret.HardState = pb.HardState{
+			Term:   0,
+			Vote:   0,
+			Commit: 0,
+		}
+	}
 	if len(rn.Raft.RaftLog.allEntries()) != 0 {
+		// log.Info(rn.Raft.RaftLog.entries, rn.Raft.RaftLog.committed, rn.Raft.RaftLog.applied)
 		ret.CommittedEntries = rn.Raft.RaftLog.entries[(rn.Raft.RaftLog.applied-rn.Raft.RaftLog.entries[0].Index)+1 : (rn.Raft.RaftLog.committed-rn.Raft.RaftLog.entries[0].Index)+1]
+	}
+	if len(rn.Raft.msgs) != 0 {
+		ret.Messages = rn.Raft.msgs
+		rn.Raft.msgs = rn.Raft.msgs[:0]
 	}
 	return ret
 }

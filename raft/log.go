@@ -15,6 +15,7 @@
 package raft
 
 import (
+	"fmt"
 	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"github.com/pkg/errors"
@@ -87,6 +88,11 @@ func newLog(storage Storage) *RaftLog {
 	}
 	rsp.entries = append(rsp.entries, initEntries...)
 	rsp.stabled = rsp.LastIndex()
+	/*if len(rsp.entries) == 0 {
+		rsp.committed = meta.RaftInitLogIndex
+		rsp.applied = meta.RaftInitLogIndex
+		rsp.stabled = meta.RaftInitLogIndex
+	}*/
 	return rsp
 }
 
@@ -161,3 +167,31 @@ func (l *RaftLog) Term(i uint64) (uint64, error) {
 	}
 	return l.entries[i-l.entries[0].Index].Term, nil
 }
+
+func (l *RaftLog) String() string {
+	entriesStr := "{"
+	for _, entry := range l.entries {
+		entriesStr += " [" + entry.String() + "] "
+	}
+	entriesStr += "}"
+	return fmt.Sprintf("RaftLog:{commit: %d applied: %d stabled: %d entries:%s}", l.committed, l.applied, l.stabled, entriesStr)
+}
+
+/*
+	// committed is the highest log position that is known to be in
+	// stable storage on a quorum of nodes.
+	committed uint64
+
+	// applied is the highest log position that the application has
+	// been instructed to apply to its state machine.
+	// Invariant: applied <= committed
+	applied uint64
+
+	// log entries with index <= stabled are persisted to storage.
+	// It is used to record the logs that are not persisted by storage yet.
+	// Everytime handling `Ready`, the unstabled logs will be included.
+	stabled uint64
+
+	// all entries that have not yet compact.
+	entries []pb.Entry
+*/

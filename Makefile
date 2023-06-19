@@ -69,6 +69,7 @@ project2ac:
 	$(GOTEST) ./raft -run 2AC
 
 project2b:
+	LOG_LEVEL=debug
 	$(TEST_CLEAN)
 	$(GOTEST) ./kv/test_raftstore -run ^TestBasic2B$ || true
 	$(GOTEST) ./kv/test_raftstore -run ^TestConcurrent2B$ || true

@@ -2,6 +2,9 @@ package raftstore
 
 import (
 	"fmt"
+	"github.com/pingcap-incubator/tinykv/kv/raftstore/meta"
+	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
+	"github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"time"
 
 	"github.com/Connor1996/badger/y"
@@ -43,6 +46,102 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		return
 	}
 	// Your Code Here (2B).
+	ready := d.RaftGroup.Ready()
+	_, err := d.peerStorage.SaveReadyState(&ready)
+	if err != nil {
+		log.Errorf(err.Error())
+		return
+	}
+	for _, msg := range ready.Messages {
+		err := d.sendRaftMessage(msg, d.ctx.trans)
+		if err != nil {
+			log.Errorf(err.Error())
+			return
+		}
+	}
+	raftCmdRsp := raft_cmdpb.RaftCmdResponse{
+		Header: &raft_cmdpb.RaftResponseHeader{
+			Error:       nil,
+			Uuid:        nil,
+			CurrentTerm: d.RaftGroup.Raft.Term,
+		},
+		Responses:     nil,
+		AdminResponse: nil,
+	}
+
+	applyState := d.peerStorage.applyState
+	for _, entry := range ready.CommittedEntries {
+		// msgStr, _ := msg.Marshal()
+		if entry.EntryType == eraftpb.EntryType_EntryNormal {
+			var raftCmdReq raft_cmdpb.RaftCmdRequest
+			err := raftCmdReq.Unmarshal(entry.Data)
+			if err != nil {
+				log.Errorf(err.Error())
+				return
+			}
+			for _, req := range raftCmdReq.Requests {
+				/*
+					CmdType_Invalid CmdType = 0
+					CmdType_Get     CmdType = 1
+					CmdType_Put     CmdType = 3
+					CmdType_Delete  CmdType = 4
+					CmdType_Snap    CmdType = 5
+				*/
+				if req.CmdType == raft_cmdpb.CmdType_Get {
+					val, err := engine_util.GetCF(d.peerStorage.Engines.Kv, req.Get.Cf, req.Get.Key)
+					if err != nil {
+						log.Errorf(err.Error())
+						return
+					}
+					rsp := &raft_cmdpb.Response{
+						CmdType: raft_cmdpb.CmdType_Get,
+						Get: &raft_cmdpb.GetResponse{
+							Value: val,
+						},
+					}
+					raftCmdRsp.Responses = append(raftCmdRsp.Responses, rsp)
+				} else if req.CmdType == raft_cmdpb.CmdType_Put {
+					err := engine_util.PutCF(d.peerStorage.Engines.Kv, req.Put.Cf, req.Put.Key, req.Put.Value)
+					if err != nil {
+						log.Errorf(err.Error())
+						return
+					}
+					rsp := &raft_cmdpb.Response{
+						CmdType: raft_cmdpb.CmdType_Put,
+						Put:     &raft_cmdpb.PutResponse{},
+					}
+					raftCmdRsp.Responses = append(raftCmdRsp.Responses, rsp)
+				} else if req.CmdType == raft_cmdpb.CmdType_Delete {
+					err := engine_util.DeleteCF(d.peerStorage.Engines.Kv, req.Delete.Cf, req.Delete.Key)
+					if err != nil {
+						log.Errorf(err.Error())
+						return
+					}
+					rsp := &raft_cmdpb.Response{
+						CmdType: raft_cmdpb.CmdType_Delete,
+						Delete:  &raft_cmdpb.DeleteResponse{},
+					}
+					raftCmdRsp.Responses = append(raftCmdRsp.Responses, rsp)
+				} else if req.CmdType == raft_cmdpb.CmdType_Snap {
+
+				} else {
+
+				}
+			}
+		}
+		applyState.AppliedIndex = entry.Index
+	}
+	err = engine_util.PutMeta(d.peerStorage.Engines.Kv, meta.ApplyStateKey(d.regionId), applyState)
+	if err != nil {
+		return
+	}
+	d.peerStorage.applyState = applyState
+	d.RaftGroup.Advance(ready)
+	for _, proposal := range d.proposals {
+		if raftCmdRsp.Header.CurrentTerm == proposal.term && applyState.AppliedIndex == proposal.index {
+			proposal.cb.Done(&raftCmdRsp)
+		}
+	}
 }
 
 func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
@@ -113,7 +212,47 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		cb.Done(ErrResp(err))
 		return
 	}
-	// Your Code Here (2B).
+	// Your Code Here (2B)
+	msgStr, _ := msg.Marshal()
+	err = d.RaftGroup.Propose(msgStr)
+	if err != nil {
+		return
+	}
+	d.proposals = append(d.proposals, &proposal{
+		index: d.peer.nextProposalIndex(),
+		term:  msg.Header.Term,
+		cb:    cb,
+	})
+	/*
+		switch msg.Type {
+		case message.MsgTypeRaftMessage:
+			raftMsg := msg.Data.(*rspb.RaftMessage)
+			if err := d.onRaftMsg(raftMsg); err != nil {
+				log.Errorf("%s handle raft message error %v", d.Tag, err)
+			}
+		case message.MsgTypeRaftCmd:
+			raftCMD := msg.Data.(*message.MsgRaftCmd)
+			d.proposeRaftCommand(raftCMD.Request, raftCMD.Callback)
+	*/
+	/*message.Msg{
+		Type:     0,
+		RegionID: 0,
+		Data:     nil,
+	}
+	message.MsgRaftCmd{
+		Request:  nil,
+		Callback: nil,
+	}
+	rspb.RaftMessage{
+		RegionId:    0,
+		FromPeer:    nil,
+		ToPeer:      nil,
+		Message:     nil,
+		RegionEpoch: d.peer.,
+		IsTombstone: false,
+		StartKey:    nil,
+		EndKey:      nil,
+	}*/
 }
 
 func (d *peerMsgHandler) onTick() {

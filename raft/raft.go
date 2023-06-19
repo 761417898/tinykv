@@ -16,6 +16,9 @@ package raft
 
 import (
 	"errors"
+	"fmt"
+	"github.com/pingcap-incubator/tinykv/kv/raftstore/meta"
+	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"math/rand"
 )
@@ -169,7 +172,10 @@ func newRaft(c *Config) *Raft {
 		panic(err.Error())
 	}
 	// Your Code Here (2A).
-	hardState, _, err := c.Storage.InitialState()
+	hardState, confState, err := c.Storage.InitialState()
+	if c.peers == nil || len(c.peers) == 0 {
+		c.peers = confState.Nodes
+	}
 	if err != nil {
 		panic(err.Error())
 	}
@@ -284,6 +290,9 @@ func (r *Raft) tick() {
 		}
 	}
 	if r.electionElapsed == r.electionTimeout {
+		if r.State == StateLeader {
+			return
+		}
 		err := r.Step(pb.Message{MsgType: pb.MessageType_MsgHup})
 		if err != nil {
 			return
@@ -302,6 +311,7 @@ func (r *Raft) becomeFollower(term uint64, lead uint64) {
 // becomeCandidate transform this peer's state to candidate
 func (r *Raft) becomeCandidate() {
 	// Your Code Here (2A).
+	log.Infof("peerid = %d timeout, becomes Candidate", r.id)
 	r.State = StateCandidate
 	for id, _ := range r.Prs {
 		r.votes[id] = false
@@ -316,6 +326,7 @@ func (r *Raft) becomeCandidate() {
 func (r *Raft) becomeLeader() {
 	// Your Code Here (2A).
 	// NOTE: Leader should propose a noop entry on its term
+	log.Infof("peerid = %d becomes leader", r.id)
 	r.State = StateLeader
 	r.Lead = r.id
 	for _, peer := range r.Prs {
@@ -380,6 +391,13 @@ func (r *Raft) Step(m pb.Message) error {
 	/*for r.RaftLog.applied < r.RaftLog.committed {
 		r.RaftLog.applied++
 	}*/
+	msgsStr := "{"
+	for _, msg := range r.msgs {
+		msgsStr += " [" + msg.String() + "] "
+	}
+	msgsStr += "}"
+
+	log.Infof("%s receives {%s}, sends {%s}", r.String(), m.String(), msgsStr)
 	return nil
 }
 
@@ -467,6 +485,7 @@ func (r *Raft) handleRequestVoteResponse(m pb.Message) {
 		lastEntryIndex = r.RaftLog.LastIndex()f
 		lastEntryTerm, _ = r.RaftLog.Term(lastEntryIndex)
 	}*/
+	log.Infof("peerid = %d, term = %d receives %s", r.id, r.Term, m.String())
 	if r.Term < m.Term {
 		r.State = StateFollower
 		r.Lead = 0
@@ -663,6 +682,9 @@ func (r *Raft) handleHeartbeatResponse(m pb.Message) {
 
 func (r *Raft) handlePropose(m pb.Message) {
 	lastIndex := r.RaftLog.LastIndex()
+	if len(r.RaftLog.entries) == 0 && r.RaftLog.committed == meta.RaftInitLogIndex {
+		//	lastIndex = r.RaftLog.committed
+	}
 	for i, entry := range m.Entries {
 		entry.Index = lastIndex + uint64(i) + 1
 		entry.Term = r.Term
@@ -670,6 +692,8 @@ func (r *Raft) handlePropose(m pb.Message) {
 	}
 	r.Prs[r.id].Match = r.RaftLog.LastIndex()
 	r.Prs[r.id].Next = r.RaftLog.LastIndex() + 1
+	//r.Prs[r.id].Match = lastIndex
+	//r.Prs[r.id].Next = lastIndex + 1
 	for peer, _ := range r.Prs {
 		if peer == r.id {
 			continue
@@ -679,6 +703,37 @@ func (r *Raft) handlePropose(m pb.Message) {
 	if len(r.Prs) == 1 {
 		r.RaftLog.committed = r.RaftLog.LastIndex()
 	}
+}
+
+/*
+type Raft struct {
+	id uint64
+
+	Term uint64
+	Vote uint64
+
+	// the log
+	RaftLog *RaftLog
+
+	// log replication progress of each peers
+	Prs map[uint64]*Progress
+
+	// this peer's role
+	State StateType
+
+	// votes records
+	votes map[uint64]bool
+
+	// msgs need to send
+	msgs []pb.Message
+
+	// the leader id
+	Lead uint64
+*/
+
+func (r *Raft) String() string {
+	return fmt.Sprintf("RaftState:{peerid: %d Term: %d Vote: %d State: %s RaftLog: %s}",
+		r.id, r.Term, r.Vote, r.State.String(), r.RaftLog.String())
 }
 
 // handleSnapshot handle Snapshot RPC request
