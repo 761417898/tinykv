@@ -17,7 +17,6 @@ package raft
 import (
 	"errors"
 	"fmt"
-	"github.com/pingcap-incubator/tinykv/kv/raftstore/meta"
 	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"math/rand"
@@ -205,6 +204,8 @@ func newRaft(c *Config) *Raft {
 		}
 	}
 	rsp.RaftLog.committed = hardState.Commit
+	rsp.RaftLog.applied = c.Applied
+	log.Infof("Raft init, peerid=%d, log commitid=%d, applied=%d, stabled=%d", rsp.id, rsp.RaftLog.committed, rsp.RaftLog.applied, rsp.RaftLog.stabled)
 	return rsp
 }
 
@@ -397,7 +398,7 @@ func (r *Raft) Step(m pb.Message) error {
 	}
 	msgsStr += "}"
 
-	log.Infof("%s receives {%s}, sends {%s}", r.String(), m.String(), msgsStr)
+	//log.Infof("%s receives {%s}, sends {%s}", r.String(), m.String(), msgsStr)
 	return nil
 }
 
@@ -523,7 +524,9 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 		if r.id != m.From {
 			r.becomeFollower(m.Term, m.From)
 			r.electionElapsed = 0
-			r.Vote = 0
+			if r.Vote != m.From {
+				r.Vote = 0
+			}
 		}
 	} else {
 		return
@@ -682,8 +685,14 @@ func (r *Raft) handleHeartbeatResponse(m pb.Message) {
 
 func (r *Raft) handlePropose(m pb.Message) {
 	lastIndex := r.RaftLog.LastIndex()
-	if len(r.RaftLog.entries) == 0 && r.RaftLog.committed == meta.RaftInitLogIndex {
-		//	lastIndex = r.RaftLog.committed
+	if lastIndex == 0 {
+		lastIndex = r.RaftLog.committed
+		for peer, _ := range r.Prs {
+			if peer != r.id {
+				r.Prs[peer].Match = r.RaftLog.committed
+				r.Prs[peer].Next = r.RaftLog.committed + 1
+			}
+		}
 	}
 	for i, entry := range m.Entries {
 		entry.Index = lastIndex + uint64(i) + 1
@@ -694,6 +703,7 @@ func (r *Raft) handlePropose(m pb.Message) {
 	r.Prs[r.id].Next = r.RaftLog.LastIndex() + 1
 	//r.Prs[r.id].Match = lastIndex
 	//r.Prs[r.id].Next = lastIndex + 1
+	log.Infof("Handle Proposal %s, %s", r.String(), m.String())
 	for peer, _ := range r.Prs {
 		if peer == r.id {
 			continue
@@ -732,8 +742,8 @@ type Raft struct {
 */
 
 func (r *Raft) String() string {
-	return fmt.Sprintf("RaftState:{peerid: %d Term: %d Vote: %d State: %s RaftLog: %s}",
-		r.id, r.Term, r.Vote, r.State.String(), r.RaftLog.String())
+	return fmt.Sprintf("RaftState:{peerid: %d Term: %d Vote: %d State: %s}",
+		r.id, r.Term, r.Vote, r.State.String())
 }
 
 // handleSnapshot handle Snapshot RPC request

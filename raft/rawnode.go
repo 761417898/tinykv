@@ -193,7 +193,7 @@ func (rn *RawNode) Ready() Ready {
 		}
 	}
 	if len(rn.Raft.RaftLog.allEntries()) != 0 {
-		// log.Info(rn.Raft.RaftLog.entries, rn.Raft.RaftLog.committed, rn.Raft.RaftLog.applied)
+		//log.Infof("peerid=%d, commitid=%d, applied=%d", rn.Raft.id, rn.Raft.RaftLog.committed, rn.Raft.RaftLog.applied)
 		ret.CommittedEntries = rn.Raft.RaftLog.entries[(rn.Raft.RaftLog.applied-rn.Raft.RaftLog.entries[0].Index)+1 : (rn.Raft.RaftLog.committed-rn.Raft.RaftLog.entries[0].Index)+1]
 	}
 	if len(rn.Raft.msgs) != 0 {

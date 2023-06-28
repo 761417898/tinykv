@@ -59,18 +59,19 @@ func (d *peerMsgHandler) HandleRaftReady() {
 			return
 		}
 	}
-	raftCmdRsp := raft_cmdpb.RaftCmdResponse{
-		Header: &raft_cmdpb.RaftResponseHeader{
-			Error:       nil,
-			Uuid:        nil,
-			CurrentTerm: d.RaftGroup.Raft.Term,
-		},
-		Responses:     nil,
-		AdminResponse: nil,
-	}
 
 	applyState := d.peerStorage.applyState
+	isSnapReq := false
 	for _, entry := range ready.CommittedEntries {
+		raftCmdRsp := raft_cmdpb.RaftCmdResponse{
+			Header: &raft_cmdpb.RaftResponseHeader{
+				Error:       nil,
+				Uuid:        nil,
+				CurrentTerm: d.RaftGroup.Raft.Term,
+			},
+			Responses:     nil,
+			AdminResponse: nil,
+		}
 		// msgStr, _ := msg.Marshal()
 		if entry.EntryType == eraftpb.EntryType_EntryNormal {
 			var raftCmdReq raft_cmdpb.RaftCmdRequest
@@ -123,25 +124,40 @@ func (d *peerMsgHandler) HandleRaftReady() {
 					}
 					raftCmdRsp.Responses = append(raftCmdRsp.Responses, rsp)
 				} else if req.CmdType == raft_cmdpb.CmdType_Snap {
-
+					// err := engine_util.
+					rsp := &raft_cmdpb.Response{
+						CmdType: raft_cmdpb.CmdType_Snap,
+						Snap: &raft_cmdpb.SnapResponse{
+							Region: d.Region(),
+						},
+					}
+					raftCmdRsp.Responses = append(raftCmdRsp.Responses, rsp)
+					isSnapReq = true
 				} else {
 
 				}
+				log.Infof("peerid=%d, CommidID=%d, RaftCommitID=%d, EntryIdx=%d, RaftCmdReq=%s, RaftCmdRsp=%s",
+					d.peer.PeerId(), ready.Commit, entry.Index, raftCmdReq.String(), raftCmdRsp.String())
 			}
 		}
 		applyState.AppliedIndex = entry.Index
-	}
-	err = engine_util.PutMeta(d.peerStorage.Engines.Kv, meta.ApplyStateKey(d.regionId), applyState)
-	if err != nil {
-		return
-	}
-	d.peerStorage.applyState = applyState
-	d.RaftGroup.Advance(ready)
-	for _, proposal := range d.proposals {
-		if raftCmdRsp.Header.CurrentTerm == proposal.term && applyState.AppliedIndex == proposal.index {
-			proposal.cb.Done(&raftCmdRsp)
+		err = engine_util.PutMeta(d.peerStorage.Engines.Kv, meta.ApplyStateKey(d.regionId), applyState)
+		if err != nil {
+			return
+		}
+		d.peerStorage.applyState = applyState
+		for proId, proposal := range d.proposals {
+			//log.Infof("peerid=%d, %d %d %d %d %d", d.peer.PeerId(), proId, proposal.index, proposal.term, raftCmdRsp.Header.CurrentTerm, applyState.AppliedIndex)
+			if raftCmdRsp.Header.CurrentTerm >= proposal.term && applyState.AppliedIndex >= proposal.index {
+				if isSnapReq {
+					proposal.cb.Txn = d.peerStorage.Engines.Kv.NewTransaction(false)
+				}
+				proposal.cb.Done(&raftCmdRsp)
+				d.proposals = append(d.proposals[:proId], d.proposals[proId+1:]...)
+			}
 		}
 	}
+	d.RaftGroup.Advance(ready)
 }
 
 func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
@@ -218,9 +234,11 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 	if err != nil {
 		return
 	}
+	proposalIdx := d.peer.nextProposalIndex() - 1
+	proposalTerm := d.RaftGroup.Raft.Term
 	d.proposals = append(d.proposals, &proposal{
-		index: d.peer.nextProposalIndex(),
-		term:  msg.Header.Term,
+		index: proposalIdx,
+		term:  proposalTerm,
 		cb:    cb,
 	})
 	/*

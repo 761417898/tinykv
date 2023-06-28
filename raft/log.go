@@ -88,11 +88,6 @@ func newLog(storage Storage) *RaftLog {
 	}
 	rsp.entries = append(rsp.entries, initEntries...)
 	rsp.stabled = rsp.LastIndex()
-	/*if len(rsp.entries) == 0 {
-		rsp.committed = meta.RaftInitLogIndex
-		rsp.applied = meta.RaftInitLogIndex
-		rsp.stabled = meta.RaftInitLogIndex
-	}*/
 	return rsp
 }
 
@@ -123,6 +118,10 @@ func (l *RaftLog) unstableEntries() []pb.Entry {
 	// Your Code Here (2A).
 	if len(l.entries) == 0 {
 		return []pb.Entry{}
+	}
+	if l.stabled == 0 {
+		return l.entries
+		// log.Infof("stabled = %d", l.stabled)
 	}
 	if !((l.stabled-l.entries[0].Index)+1 >= 0 && int((l.stabled-l.entries[0].Index)+1) < len(l.entries)) {
 		return []pb.Entry{}

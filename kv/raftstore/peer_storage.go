@@ -354,22 +354,35 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 	if err != nil {
 		return nil, err
 	}
-	raftState := &rspb.RaftLocalState{
-		HardState: &eraftpb.HardState{
-			Term:   ready.Term,
-			Vote:   ready.Vote,
-			Commit: ready.Commit,
-		},
-		LastIndex: 0,
-		LastTerm:  0,
+
+	raftState, err := meta.GetRaftLocalState(ps.Engines.Raft, ps.region.Id)
+	if err != nil && err != badger.ErrKeyNotFound {
+		return nil, err
 	}
+	if err == badger.ErrKeyNotFound {
+		raftState = new(rspb.RaftLocalState)
+		raftState.HardState = new(eraftpb.HardState)
+	}
+	/*
+		raftState := &rspb.RaftLocalState{
+			HardState: &eraftpb.HardState{
+				Term:   ready.Term,
+				Vote:   ready.Vote,
+				Commit: ready.Commit,
+			},
+			LastIndex: 0,
+			LastTerm:  0,
+		}*/
+	raftState.HardState.Commit = ready.Commit
+	raftState.HardState.Term = ready.Term
+	raftState.HardState.Vote = ready.Vote
 	if len(ready.Entries) > 0 {
 		raftState.LastIndex = ready.Entries[len(ready.Entries)-1].Index
 	}
 	if len(ready.Entries) > 0 {
 		raftState.LastTerm = ready.Entries[len(ready.Entries)-1].Term
 	}
-	err = engine_util.PutMeta(ps.Engines.Raft, meta.RaftStateKey(ps.region.Id), ps.raftState)
+	err = engine_util.PutMeta(ps.Engines.Raft, meta.RaftStateKey(ps.region.Id), raftState)
 	if err != nil {
 		return nil, err
 	}

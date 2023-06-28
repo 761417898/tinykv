@@ -312,6 +312,7 @@ func (c *Cluster) MustPutCF(cf string, key, value []byte) {
 	if resp.Responses[0].CmdType != raft_cmdpb.CmdType_Put {
 		panic("resp.Responses[0].CmdType != raft_cmdpb.CmdType_Put")
 	}
+	// log.Infof("recv put rsp %s\n", resp.String())
 }
 
 func (c *Cluster) MustGet(key []byte, value []byte) {
@@ -374,6 +375,8 @@ func (c *Cluster) Scan(start, end []byte) [][]byte {
 			panic("resp.Responses[0].CmdType != raft_cmdpb.CmdType_Snap")
 		}
 		region := resp.Responses[0].GetSnap().Region
+		//log.Infof("recv getsnap rsp %s", resp.String())
+		//log.Info(txn)
 		iter := raft_storage.NewRegionReader(txn, *region).IterCF(engine_util.CfDefault)
 		for iter.Seek(key); iter.Valid(); iter.Next() {
 			if engine_util.ExceedEndKey(iter.Item().Key(), end) {
@@ -384,6 +387,7 @@ func (c *Cluster) Scan(start, end []byte) [][]byte {
 				panic(err)
 			}
 			values = append(values, value)
+			//log.Infof("key=%s val=%s", key, value)
 		}
 		iter.Close()
 
