@@ -20,6 +20,7 @@ import (
 	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"math/rand"
+	"strconv"
 )
 
 // None is a placeholder node ID used when there is no leader.
@@ -206,8 +207,16 @@ func newRaft(c *Config) *Raft {
 		}
 	}
 	rsp.RaftLog.committed = hardState.Commit
-	rsp.RaftLog.applied = c.Applied
-	log.Infof("Raft init, peerid=%d, log commitid=%d, applied=%d, stabled=%d", rsp.id, rsp.RaftLog.committed, rsp.RaftLog.applied, rsp.RaftLog.stabled)
+	snap, err := c.Storage.Snapshot()
+	if err == nil {
+		rsp.RaftLog.applied = snap.Metadata.Index
+	} else {
+		rsp.RaftLog.applied = c.Applied
+	}
+	log.Infof("Raft init with config={len(peers)=%d}, "+
+		"peerid=%d, log commitid=%d, applied=%d, stabled=%d",
+		len(c.peers),
+		rsp.id, rsp.RaftLog.committed, rsp.RaftLog.applied, rsp.RaftLog.stabled)
 	return rsp
 }
 
@@ -215,7 +224,29 @@ func newRaft(c *Config) *Raft {
 // current commit index to the given peer. Returns true if a message was sent.
 func (r *Raft) sendAppend(to uint64) bool {
 	// Your Code Here (2A).
-
+	if r.Prs[to].Next < r.RaftLog.entries[0].Index {
+		// 需要有个appendEntry回复，更新Next
+		snapshot := pb.Snapshot{}
+		var err error
+		snapshot, err = r.RaftLog.storage.Snapshot()
+		if err != nil {
+			log.Infof("snapshot not ready")
+			return false
+		}
+		/*if snapshot.Metadata.Index == 0 {
+			log.Infof("snapshot index=0 not meet need")
+			return false
+		}*/
+		r.msgs = append(r.msgs, pb.Message{
+			MsgType:  pb.MessageType_MsgSnapshot,
+			To:       to,
+			From:     r.id,
+			Term:     r.Term,
+			Commit:   r.RaftLog.committed,
+			Snapshot: &snapshot,
+		})
+		return true
+	}
 	if r.Prs[to].Next > r.RaftLog.LastIndex() ||
 		!(r.Prs[to].Next >= r.RaftLog.entries[0].Index &&
 			r.Prs[to].Next <= r.RaftLog.entries[len(r.RaftLog.entries)-1].Index) {
@@ -286,6 +317,15 @@ func (r *Raft) sendRequestVote() {
 		voteReq.To = peer
 		r.msgs = append(r.msgs, voteReq)
 	}
+}
+
+func (r *Raft) sendTimeoutNow(to uint64) {
+	r.msgs = append(r.msgs, pb.Message{
+		MsgType: pb.MessageType_MsgTimeoutNow,
+		To:      to,
+		From:    r.id,
+		Term:    r.Term,
+	})
 }
 
 // tick advances the internal logical clock by a single tick.
@@ -369,6 +409,23 @@ func (r *Raft) becomeLeader() {
 // on `eraftpb.proto` for what msgs should be handled
 func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
+	found := false
+	for peer, _ := range r.Prs {
+		if r.id == peer {
+			found = true
+		}
+	}
+	if !found {
+		if m.MsgType == pb.MessageType_MsgHeartbeat {
+			r.Vote = m.From
+			r.becomeFollower(m.Term, m.From)
+			r.Prs = make(map[uint64]*Progress)
+			r.addNode(r.id)
+			r.addNode(m.From)
+		} else {
+			return errors.New("peerid=" + strconv.Itoa(int(r.id)) + " has been removed")
+		}
+	}
 	switch m.MsgType {
 	case pb.MessageType_MsgHup:
 		r.handleHup()
@@ -400,9 +457,22 @@ func (r *Raft) Step(m pb.Message) error {
 		}
 	case pb.MessageType_MsgPropose:
 		if r.State == StateLeader {
+			/*if r.leadTransferee != 0 {
+				log.Infof("peerid=%d, TransferLeader is in progress, proposal is hold on, transferee=%d", r.id, r.leadTransferee)
+				return errors.New("TransferLeader is in progress, proposal is hold on")
+			}*/
 			r.handlePropose(m)
+		} else {
+			return errors.New("request is not on leader")
 		}
-
+	case pb.MessageType_MsgSnapshot:
+		r.handleSnapshot(m)
+	case pb.MessageType_MsgTransferLeader:
+		//if r.State == StateLeader {
+		r.handleTransferLeader(m)
+		//}
+	case pb.MessageType_MsgTimeoutNow:
+		r.handleTimeoutNow()
 	}
 	/*for r.RaftLog.applied < r.RaftLog.committed {
 		r.RaftLog.applied++
@@ -413,7 +483,7 @@ func (r *Raft) Step(m pb.Message) error {
 	}
 	msgsStr += "}"
 
-	log.Infof("%s receives {%s}, sends {%s}", r.String(), m.String(), msgsStr)
+	// log.Infof("%s receives {%s}, sends {%s}", r.String(), m.String(), msgsStr)
 	return nil
 }
 
@@ -496,6 +566,9 @@ func (r *Raft) handleRequestVote(m pb.Message) {
 		requestVoteResponse.LogTerm = lastEntryTerm
 		requestVoteResponse.Index = lastEntryIndex
 	}
+	if requestVoteResponse.Reject == false {
+		r.Lead = r.Vote
+	}
 	r.msgs = append(r.msgs, requestVoteResponse)
 }
 
@@ -507,7 +580,7 @@ func (r *Raft) handleRequestVoteResponse(m pb.Message) {
 		lastEntryIndex = r.RaftLog.LastIndex()f
 		lastEntryTerm, _ = r.RaftLog.Term(lastEntryIndex)
 	}*/
-	log.Infof("peerid = %d, term = %d receives %s", r.id, r.Term, m.String())
+	//log.Infof("peerid = %d, term = %d receives %s", r.id, r.Term, m.String())
 	if r.Term < m.Term {
 		r.State = StateFollower
 		r.Lead = 0
@@ -553,6 +626,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	} else {
 		return
 	}
+	r.Lead = m.From
 	rsp := pb.Message{
 		MsgType: pb.MessageType_MsgAppendResponse,
 		To:      m.From,
@@ -561,6 +635,15 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 		Reject:  true,
 	}
 	offset := 0
+	if len(r.RaftLog.entries) == 0 && r.RaftLog.stabled == 0 &&
+		r.RaftLog.applied == 0 && r.RaftLog.committed == 0 && m.Index != 0 {
+		//
+		log.Infof("peerid=%d is newly added node", r.id)
+		rsp.Reject = false
+		rsp.Index = 0
+		r.msgs = append(r.msgs, rsp)
+		return
+	}
 	if m.Index != 0 || m.LogTerm != 0 {
 		localPrevLogTerm, err := r.RaftLog.Term(m.Index)
 		if err != nil || (m.LogTerm != localPrevLogTerm) {
@@ -600,10 +683,34 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 		idx++
 	}
 	idx = 0
+
+	debugStr := strconv.Itoa(int(r.id)) + " oldEntry: "
+	for i := 0; i < len(oldEntries); i++ {
+		debugStr += strconv.FormatUint(oldEntries[i].Index, 10) + " "
+	}
+	//log.Infof(debugStr)
+
+	debugStr = strconv.Itoa(int(r.id)) + " newEntry: "
+	for i := 0; i < len(r.RaftLog.entries); i++ {
+		debugStr += strconv.FormatUint(r.RaftLog.entries[i].Index, 10) + " "
+	}
+	//log.Infof(debugStr)
+
 	for idx < len(oldEntries) && idx < len(r.RaftLog.entries) {
 		if oldEntries[idx].Index != r.RaftLog.entries[idx].Index ||
 			oldEntries[idx].Term != r.RaftLog.entries[idx].Term {
+			//log.Infof("peerid=%d set stabled from %d to %d", r.id, r.RaftLog.stabled, min(r.RaftLog.stabled, oldEntries[idx].Index-1))
+			tmpStabled := r.RaftLog.stabled
 			r.RaftLog.stabled = min(r.RaftLog.stabled, oldEntries[idx].Index-1)
+			if r.RaftLog.stabled+1 < r.RaftLog.entries[0].Index {
+				r.RaftLog.stabled = tmpStabled
+				rsp.Reject = true
+				r.RaftLog.entries = make([]pb.Entry, len(oldEntries))
+				copy(r.RaftLog.entries, oldEntries)
+				r.msgs = append(r.msgs, rsp)
+				return
+			}
+			//}
 			break
 		}
 		idx++
@@ -668,6 +775,12 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 		}
 		N--
 	}
+	//log.Errorf("%d %d %d", r.leadTransferee, r.Prs[m.From].Match, r.RaftLog.LastIndex())
+	if r.leadTransferee != 0 && r.Prs[m.From].Match == r.RaftLog.LastIndex() {
+		log.Infof("peerid=%d, sendAppend to leaderTransferee=%d", r.id, r.leadTransferee)
+		r.sendTimeoutNow(r.leadTransferee)
+		// r.leadTransferee = 0
+	}
 }
 
 // handleHeartbeat handle Heartbeat RPC request
@@ -684,6 +797,7 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 		r.msgs = append(r.msgs, rsp)
 		return
 	}
+	r.Lead = m.From
 	r.becomeFollower(m.Term, m.From)
 	r.heartbeatElapsed = 0
 	r.electionElapsed = -1 * (rand.Int() % r.electionTimeout)
@@ -709,6 +823,14 @@ func (r *Raft) handleHeartbeatResponse(m pb.Message) {
 }
 
 func (r *Raft) handlePropose(m pb.Message) {
+	if r.leadTransferee != 0 {
+		if r.Lead != r.leadTransferee {
+			log.Infof("peerid=%d, TransferLeader is in progress, proposal is hold on, transferee=%d", r.id, r.leadTransferee)
+			return
+		} else {
+			r.leadTransferee = 0
+		}
+	}
 	lastIndex := r.RaftLog.LastIndex()
 	if lastIndex == 0 {
 		lastIndex = r.RaftLog.committed
@@ -737,6 +859,52 @@ func (r *Raft) handlePropose(m pb.Message) {
 	}
 	if len(r.Prs) == 1 {
 		r.RaftLog.committed = r.RaftLog.LastIndex()
+	}
+}
+
+func (r *Raft) handleTransferLeader(m pb.Message) {
+	// log.Infof("handle TransferLeader")
+	found := false
+	for peer, _ := range r.Prs {
+		if peer == m.From {
+			found = true
+		}
+	}
+	if !found {
+		log.Errorf("illegal transferee %d", r.leadTransferee)
+		return
+	}
+	if r.leadTransferee != m.From {
+		r.leadTransferee = m.From
+	}
+	if r.leadTransferee == r.id {
+		if r.State == StateLeader {
+			r.leadTransferee = 0
+			return
+		} else {
+			r.sendTimeoutNow(r.leadTransferee)
+			return
+		}
+	}
+	if r.Prs[r.leadTransferee].Match == r.RaftLog.LastIndex() {
+		log.Infof("peerid=%d, sendTimeoutNow to leaderTransferee=%d", r.id, r.leadTransferee)
+		r.sendTimeoutNow(r.leadTransferee)
+		// r.leadTransferee = 0
+	} else {
+		log.Infof("peerid=%d, sendAppend to leaderTransferee=%d", r.id, r.leadTransferee)
+		r.sendAppend(r.leadTransferee)
+	}
+}
+
+func (r *Raft) handleTimeoutNow() {
+	log.Infof("peerid=%d will become leader immediately for LeaderTransfer", r.id)
+	if r.State == StateLeader {
+		return
+	}
+	r.becomeCandidate()
+	r.sendRequestVote()
+	if len(r.Prs) == 1 {
+		r.becomeLeader()
 	}
 }
 
@@ -774,14 +942,89 @@ func (r *Raft) String() string {
 // handleSnapshot handle Snapshot RPC request
 func (r *Raft) handleSnapshot(m pb.Message) {
 	// Your Code Here (2C).
+	if r.Term > m.Term {
+		log.Infof("term not meet need return ")
+		return
+	}
+	if r.RaftLog.pendingSnapshot != nil {
+		log.Infof("local snapshot is pending")
+		return
+	}
+	if r.RaftLog.committed > m.Snapshot.Metadata.Index {
+		log.Infof("committed no need return, lastIndex=%d", r.RaftLog.LastIndex())
+		return
+	}
+	log.Infof("peerid=%d recv snapshot from %d, metaIndex=%d", r.id, m.From, m.Snapshot.Metadata.Index)
+	r.RaftLog.pendingSnapshot = m.Snapshot
+	r.Lead = m.From
+	tmpPrs := r.Prs
+	for peerId, _ := range r.Prs {
+		exits := false
+		for _, peer := range m.Snapshot.Metadata.ConfState.Nodes {
+			if peerId == peer {
+				exits = true
+			}
+		}
+		if !exits {
+			delete(tmpPrs, peerId)
+		}
+	}
+	r.Prs = tmpPrs
+	for _, peerId := range m.Snapshot.Metadata.ConfState.Nodes {
+		if _, ok := r.Prs[peerId]; !ok {
+			r.Prs[peerId] = &Progress{
+				Match: 0,
+				Next:  0,
+			}
+		}
+	}
+	r.RaftLog.entries = r.RaftLog.entries[:0]
+	r.RaftLog.stabled = m.Snapshot.Metadata.Index
+	r.RaftLog.committed = m.Snapshot.Metadata.Index
+	r.RaftLog.applied = m.Snapshot.Metadata.Index
 }
 
 // addNode add a new node to raft group
 func (r *Raft) addNode(id uint64) {
 	// Your Code Here (3A).
+	r.Prs[id] = &Progress{
+		Match: 0,
+		Next:  r.RaftLog.LastIndex(),
+	}
+	r.votes[id] = false
+	r.votes[id+DenyVoteIDOffset] = false
 }
 
 // removeNode remove a node from raft group
 func (r *Raft) removeNode(id uint64) {
 	// Your Code Here (3A).
+	delete(r.Prs, id)
+	delete(r.votes, id)
+
+	N := r.RaftLog.LastIndex()
+	for N >= r.RaftLog.committed+1 {
+		numMatched := 0
+		for _, progres := range r.Prs {
+			if progres.Match >= N {
+				numMatched++
+			}
+		}
+		term, err := r.RaftLog.Term(N)
+		if err != nil {
+			return
+		}
+		if numMatched*2 > len(r.Prs) && r.Term == term {
+			if r.RaftLog.committed != N {
+				r.RaftLog.committed = N
+				for peer, _ := range r.Prs {
+					if peer == r.id {
+						continue
+					}
+					r.sendAppend(peer)
+				}
+			}
+			break
+		}
+		N--
+	}
 }

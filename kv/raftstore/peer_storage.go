@@ -320,8 +320,8 @@ func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.Write
 			return err
 		}
 	}
-	ps.raftState.LastIndex = entries[len(entries)-1].Index
-	ps.raftState.LastTerm = entries[len(entries)-1].Term
+	//ps.raftState.LastIndex = entries[len(entries)-1].Index
+	//ps.raftState.LastTerm = entries[len(entries)-1].Term
 	return nil
 }
 
@@ -337,42 +337,84 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	// and send RegionTaskApply task to region worker through ps.regionSched, also remember call ps.clearMeta
 	// and ps.clearExtraData to delete stale data
 	// Your Code Here (2C).
-	return nil, nil
+	if len(snapData.Data) != 0 {
+		raftState := ps.raftState
+		applyState := ps.applyState
+		raftState.LastIndex = snapshot.Metadata.Index
+		raftState.LastTerm = snapshot.Metadata.Term
+		applyState.TruncatedState = &rspb.RaftTruncatedState{
+			Index: snapshot.Metadata.Index,
+			Term:  snapshot.Metadata.Term,
+		}
+		applyState.AppliedIndex = applyState.TruncatedState.Index
+		var notify chan bool
+		ps.regionSched <- runner.RegionTaskApply{
+			RegionId: snapData.Region.Id,
+			Notifier: notify,
+			SnapMeta: snapshot.Metadata,
+			StartKey: ps.region.StartKey,
+			EndKey:   ps.region.EndKey,
+		}
+		if ret := <-notify; ret != true {
+			log.Errorf("Apply Snapshot failed")
+			return nil, nil
+		}
+		err := ps.clearMeta(kvWB, raftWB)
+		if err != nil {
+			return nil, err
+		}
+		err = raftWB.SetMeta(meta.RaftStateKey(ps.region.Id), raftState)
+		if err != nil {
+			return nil, err
+		}
+		err = kvWB.SetMeta(meta.ApplyStateKey(ps.region.Id), applyState)
+		if err != nil {
+			return nil, err
+		}
+		err = kvWB.SetMeta(meta.RegionStateKey(ps.region.Id), &rspb.RegionLocalState{
+			Region: snapData.Region,
+		})
+		if err != nil {
+			return nil, err
+		}
+		ps.clearExtraData(snapData.Region)
+		return &ApplySnapResult{
+			PrevRegion: ps.Region(),
+			Region:     snapData.Region,
+		}, nil
+	} else {
+		return nil, nil
+	}
 }
 
-// Save memory states to disk.
+// SaveReadyState Save memory states to disk.
 // Do not modify ready in this function, this is a requirement to advance the ready object properly later.
 func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, error) {
 	// Hint: you may call `Append()` and `ApplySnapshot()` in this function
 	// Your Code Here (2B/2C).
+	if ready != nil && ready.Snapshot.Metadata != nil && ready.Snapshot.Metadata.Index != 0 {
+		log.Infof("SaveReadyState")
+		kvWb := engine_util.WriteBatch{}
+		raftWb := engine_util.WriteBatch{}
+		applySnapResult, err := ps.ApplySnapshot(&ready.Snapshot, &kvWb, &raftWb)
+		err = ps.Engines.WriteRaft(&raftWb)
+		if err != nil {
+			return nil, err
+		}
+		err = ps.Engines.WriteKV(&kvWb)
+		if err != nil {
+			return nil, err
+		}
+		log.Infof("process snapshot success")
+		return applySnapResult, nil
+	}
+
 	wb := engine_util.WriteBatch{}
 	err := ps.Append(ready.Entries, &wb)
 	if err != nil {
 		return nil, err
 	}
-	err = ps.Engines.WriteRaft(&wb)
-	if err != nil {
-		return nil, err
-	}
-
-	raftState, err := meta.GetRaftLocalState(ps.Engines.Raft, ps.region.Id)
-	if err != nil && err != badger.ErrKeyNotFound {
-		return nil, err
-	}
-	if err == badger.ErrKeyNotFound {
-		raftState = new(rspb.RaftLocalState)
-		raftState.HardState = new(eraftpb.HardState)
-	}
-	/*
-		raftState := &rspb.RaftLocalState{
-			HardState: &eraftpb.HardState{
-				Term:   ready.Term,
-				Vote:   ready.Vote,
-				Commit: ready.Commit,
-			},
-			LastIndex: 0,
-			LastTerm:  0,
-		}*/
+	raftState := ps.raftState
 	raftState.HardState.Commit = ready.Commit
 	raftState.HardState.Term = ready.Term
 	raftState.HardState.Vote = ready.Vote
@@ -382,7 +424,11 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 	if len(ready.Entries) > 0 {
 		raftState.LastTerm = ready.Entries[len(ready.Entries)-1].Term
 	}
-	err = engine_util.PutMeta(ps.Engines.Raft, meta.RaftStateKey(ps.region.Id), raftState)
+	err = wb.SetMeta(meta.RaftStateKey(ps.region.Id), raftState)
+	if err != nil {
+		return nil, err
+	}
+	err = wb.WriteToDB(ps.Engines.Raft)
 	if err != nil {
 		return nil, err
 	}

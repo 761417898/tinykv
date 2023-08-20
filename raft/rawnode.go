@@ -17,6 +17,8 @@ package raft
 import (
 	"errors"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
+	//"github.com/pingcap/log"
+	"github.com/pingcap-incubator/tinykv/log"
 	"go.uber.org/atomic"
 )
 
@@ -79,6 +81,7 @@ type RawNode struct {
 	// Your Data Here (2A).
 	softState *SoftState
 	hardState *pb.HardState
+	snapshot  *pb.Snapshot
 	readble   atomic.Bool
 }
 
@@ -96,6 +99,9 @@ func NewRawNode(config *Config) (*RawNode, error) {
 		Term:   ret.Raft.Term,
 		Vote:   ret.Raft.Vote,
 		Commit: ret.Raft.RaftLog.committed,
+	}
+	ret.snapshot = &pb.Snapshot{
+		Metadata: &pb.SnapshotMetadata{},
 	}
 	return ret, nil
 }
@@ -180,6 +186,18 @@ func (rn *RawNode) Ready() Ready {
 		CommittedEntries: nil,
 		Messages:         nil,
 	}
+	if rn.Raft.RaftLog.pendingSnapshot != nil {
+		//log.Info("peerid=%d pending snap ready", rn.Raft.id)
+		if rn.snapshot != nil && rn.Raft.RaftLog.pendingSnapshot.Metadata.Index != rn.snapshot.Metadata.Index {
+			log.Info("peerid=%d rawnode snap ready", rn.Raft.id)
+			rn.snapshot = rn.Raft.RaftLog.pendingSnapshot
+			ret.Snapshot = *rn.snapshot
+		} else {
+			log.Info("peerid=%d recviced repeated snap", rn.Raft.id)
+			rn.Raft.RaftLog.pendingSnapshot = nil
+		}
+		return ret
+	}
 	if rn.softState.compareSoftState(ret.SoftState) {
 		ret.SoftState = nil
 	}
@@ -193,12 +211,11 @@ func (rn *RawNode) Ready() Ready {
 		}
 	}
 	if len(rn.Raft.RaftLog.allEntries()) != 0 {
-		//log.Infof("peerid=%d, commitid=%d, applied=%d", rn.Raft.id, rn.Raft.RaftLog.committed, rn.Raft.RaftLog.applied)
+		// log.Infof("peerid=%d, commitid=%d, applied=%d", rn.Raft.id, rn.Raft.RaftLog.committed, rn.Raft.RaftLog.applied)
 		ret.CommittedEntries = rn.Raft.RaftLog.entries[(rn.Raft.RaftLog.applied-rn.Raft.RaftLog.entries[0].Index)+1 : (rn.Raft.RaftLog.committed-rn.Raft.RaftLog.entries[0].Index)+1]
 	}
 	if len(rn.Raft.msgs) != 0 {
 		ret.Messages = rn.Raft.msgs
-		rn.Raft.msgs = rn.Raft.msgs[:0]
 	}
 	return ret
 }
@@ -213,11 +230,22 @@ func (rn *RawNode) HasReady() bool {
 // last Ready results.
 func (rn *RawNode) Advance(rd Ready) {
 	// Your Code Here (2A).
+	if rd.Snapshot.Metadata != nil {
+		log.Infof("peerid=%d advance snapshot", rn.Raft.id)
+		rn.Raft.RaftLog.pendingSnapshot = nil
+		//rn.Raft.RaftLog.stabled = max(rd.Snapshot.Metadata.Index, rn.Raft.RaftLog.stabled)
+		// rn.Raft.RaftLog.entries = rn.Raft.RaftLog.entries[:0]
+		return
+	}
 	if len(rd.Entries) > 0 {
+		// log.Infof("peerid=%d set stabled from %d to %d", rn.Raft.id, rn.Raft.RaftLog.stabled, rd.Entries[len(rd.Entries)-1].Index)
 		rn.Raft.RaftLog.stabled = rd.Entries[len(rd.Entries)-1].Index
 	}
 	if len(rd.CommittedEntries) > 0 {
 		rn.Raft.RaftLog.applied = rd.CommittedEntries[len(rd.CommittedEntries)-1].Index
+	}
+	if len(rn.Raft.msgs) != 0 {
+		rn.Raft.msgs = rn.Raft.msgs[:0]
 	}
 }
 

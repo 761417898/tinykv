@@ -547,7 +547,7 @@ func TestBasicConfChange3B(t *testing.T) {
 	cluster.MustRemovePeer(1, NewPeer(3, 3))
 	cluster.MustRemovePeer(1, NewPeer(4, 4))
 	cluster.MustRemovePeer(1, NewPeer(5, 5))
-
+	log.Infof("debug: remove 2 3 4 5 success")
 	// now region 1 only has peer: (1, 1)
 	cluster.MustPut([]byte("k1"), []byte("v1"))
 	MustGetNone(cluster.engines[2], []byte("k1"))

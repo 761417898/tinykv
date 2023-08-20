@@ -408,6 +408,10 @@ func (c *Cluster) TransferLeader(regionID uint64, leader *metapb.Peer) {
 	epoch := region.RegionEpoch
 	transferLeader := NewAdminRequest(regionID, epoch, NewTransferLeaderCmd(leader))
 	resp, _ := c.CallCommandOnLeader(transferLeader, 5*time.Second)
+	if resp.AdminResponse == nil {
+		log.Errorf("resp is null")
+		log.Errorf(resp.String())
+	}
 	if resp.AdminResponse.CmdType != raft_cmdpb.AdminCmdType_TransferLeader {
 		panic("resp.AdminResponse.CmdType != raft_cmdpb.AdminCmdType_TransferLeader")
 	}

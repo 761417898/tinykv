@@ -87,7 +87,7 @@ func newLog(storage Storage) *RaftLog {
 		return nil
 	}
 	rsp.entries = append(rsp.entries, initEntries...)
-	rsp.stabled = rsp.LastIndex()
+	rsp.stabled = lastIdx
 	return rsp
 }
 
@@ -126,6 +126,9 @@ func (l *RaftLog) unstableEntries() []pb.Entry {
 	if !((l.stabled-l.entries[0].Index)+1 >= 0 && int((l.stabled-l.entries[0].Index)+1) < len(l.entries)) {
 		return []pb.Entry{}
 	}
+	//xx, _ := l.storage.FirstIndex()
+	//yy, _ := l.storage.LastIndex()
+	//log.Infof("stabled=%d entry0.Index=%d  lastIdx=%d applied=%d commited=%d StorageFirstIndex=%d StorageLastIndex=%d", l.stabled, l.entries[0].Index, l.entries[len(l.entries)-1].Index, l.applied, l.committed, xx, yy)
 	return l.entries[(l.stabled-l.entries[0].Index)+1:]
 }
 
@@ -147,6 +150,13 @@ func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 func (l *RaftLog) LastIndex() uint64 {
 	// Your Code Here (2A).
 	if len(l.entries) == 0 {
+		if l.pendingSnapshot != nil {
+			return l.pendingSnapshot.Metadata.Index
+		}
+		/*snap, err := l.storage.Snapshot()
+		if err != ErrSnapshotTemporarilyUnavailable {
+			return snap.Metadata.Index
+		}*/
 		return 0
 	}
 	return l.entries[len(l.entries)-1].Index
@@ -159,6 +169,13 @@ func (l *RaftLog) Term(i uint64) (uint64, error) {
 		return 1, nil
 	}
 	if len(l.entries) == 0 {
+		if l.pendingSnapshot != nil && i == l.pendingSnapshot.Metadata.Index {
+			return l.pendingSnapshot.Metadata.Term, nil
+		}
+		snapshot, err := l.storage.Snapshot()
+		if err != ErrSnapshotTemporarilyUnavailable && i == snapshot.Metadata.Index {
+			return l.pendingSnapshot.Metadata.Term, nil
+		}
 		return 1, errors.New("entry id empty")
 	}
 	if !(i >= l.entries[0].Index && i <= l.entries[len(l.entries)-1].Index) {

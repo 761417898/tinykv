@@ -372,10 +372,12 @@ func (m *MockSchedulerClient) handleHeartbeatConfVersion(region *metapb.Region) 
 			}
 		} else {
 			MustSamePeers(searchRegion, region)
+			log.Infof("debug: %d %d", searchRegion.RegionEpoch.ConfVer+1, region.RegionEpoch.ConfVer)
 			if searchRegion.RegionEpoch.ConfVer+1 != region.RegionEpoch.ConfVer {
 				panic("unmatched conf version")
 			}
 			if searchRegion.RegionEpoch.Version+1 != region.RegionEpoch.Version {
+				log.Infof("debug: %d %d", searchRegion.RegionEpoch.Version+1, region.RegionEpoch.Version)
 				panic("unmatched version")
 			}
 		}
