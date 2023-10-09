@@ -108,8 +108,14 @@ func (d *peerMsgHandler) HandleRaftReady() {
 						d.regionId,
 						d.peer.PeerId(),
 						changeType, destPeerId)
-					d.ctx.storeMeta.regions[destRegionId].RegionEpoch.ConfVer++
-					d.ctx.storeMeta.regions[destRegionId].RegionEpoch.Version++
+					d.ctx.storeMeta.Lock()
+					//d.ctx.storeMeta.regions[destRegionId].RegionEpoch.ConfVer++
+					//d.ctx.storeMeta.regions[destRegionId].RegionEpoch.Version++
+
+					for key, _ := range d.ctx.storeMeta.regions {
+						d.ctx.storeMeta.regions[key].RegionEpoch.ConfVer++
+					}
+
 					if changeType == eraftpb.ConfChangeType_RemoveNode {
 						for idx, peer := range d.ctx.storeMeta.regions[destRegionId].Peers {
 							if peer.Id == destPeerId {
@@ -140,14 +146,29 @@ func (d *peerMsgHandler) HandleRaftReady() {
 						meta.WriteRegionState(&batch, d.ctx.storeMeta.regions[d.regionId], rspb.PeerState_Normal)
 						_ = batch.WriteToDB(d.ctx.engine.Kv)
 					}
+					d.ctx.storeMeta.Unlock()
 					d.RaftGroup.ApplyConfChange(eraftpb.ConfChange{
 						ChangeType: changeType,
 						NodeId:     destPeerId,
 					})
+				} else if raftCmdReq.AdminRequest.GetCmdType() == raft_cmdpb.AdminCmdType_Split {
+					log.Infof("region=%d peerid=%d split region", d.regionId, d.peer.PeerId())
+					d.ctx.storeMeta.Lock()
+					//d.ctx.storeMeta.regions[d.regionId].RegionEpoch
+					/*
+						aq := &raft_cmdpb.AdminRequest{
+							CmdType: raft_cmdpb.AdminCmdType_Split,
+							Split: &raft_cmdpb.SplitRequest{
+								SplitKey:    t.SplitKey,
+								NewRegionId: resp.NewRegionId,
+								NewPeerIds:  resp.NewPeerIds,
+							},
+						}
+					*/
 				}
 			} else {
-				log.Infof("peerid=%d, Handle RaftCmdReq=%s",
-					d.peer.PeerId(), raftCmdReq.String())
+				//log.Infof("peerid=%d, Handle RaftCmdReq=%s",
+				//	d.peer.PeerId(), raftCmdReq.String())
 				for _, req := range raftCmdReq.Requests {
 					var rsp raft_cmdpb.Response
 					if req.CmdType == raft_cmdpb.CmdType_Get {
@@ -190,8 +211,8 @@ func (d *peerMsgHandler) HandleRaftReady() {
 					} else {
 
 					}
-					log.Infof("peerid=%d, PeerCommidID=%d, PeerNowApplyID=%d, RaftCmdReqRequest=%s, kvBatchLen=%d",
-						d.peer.PeerId(), ready.Commit, entry.Index, req.String(), kvBatch.Len())
+					//log.Infof("peerid=%d, PeerCommidID=%d, PeerNowApplyID=%d, RaftCmdReqRequest=%s, kvBatchLen=%d",
+					//	d.peer.PeerId(), ready.Commit, entry.Index, req.String(), kvBatch.Len())
 				}
 			}
 			applyState.AppliedIndex = entry.Index
@@ -200,8 +221,8 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		if err != nil {
 			return
 		}
-		log.Infof("peerid=%d, PeerCommidID=%d, PeerNowApplyID=%d, kvBatchLen=%d",
-			d.peer.PeerId(), ready.Commit, entry.Index, kvBatch.Len())
+		//log.Infof("peerid=%d, PeerCommidID=%d, PeerNowApplyID=%d, kvBatchLen=%d",
+		//	d.peer.PeerId(), ready.Commit, entry.Index, kvBatch.Len())
 		kvBatch.MustWriteToDB(d.peerStorage.Engines.Kv)
 		d.peerStorage.applyState = applyState
 		toDeleteProposal := new([]int)

@@ -2,15 +2,16 @@ package server
 
 import (
 	"context"
-
 	"github.com/pingcap-incubator/tinykv/kv/coprocessor"
 	"github.com/pingcap-incubator/tinykv/kv/storage"
 	"github.com/pingcap-incubator/tinykv/kv/storage/raft_storage"
 	"github.com/pingcap-incubator/tinykv/kv/transaction/latches"
+	"github.com/pingcap-incubator/tinykv/kv/transaction/mvcc"
 	coppb "github.com/pingcap-incubator/tinykv/proto/pkg/coprocessor"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/kvrpcpb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/tinykvpb"
 	"github.com/pingcap/tidb/kv"
+	"time"
 )
 
 var _ tinykvpb.TinyKvServer = new(Server)
@@ -50,7 +51,30 @@ func (server *Server) Snapshot(stream tinykvpb.TinyKv_SnapshotServer) error {
 // Transactional API.
 func (server *Server) KvGet(_ context.Context, req *kvrpcpb.GetRequest) (*kvrpcpb.GetResponse, error) {
 	// Your Code Here (4B).
-	return nil, nil
+	startTS := time.Now().Nanosecond()
+	reader, err := server.storage.Reader(req.GetContext())
+	if err != nil {
+		return nil, err
+	}
+	mxn := mvcc.NewMvccTxn(reader, uint64(startTS))
+	lock, err := mxn.GetLock(req.Key)
+	if err != nil {
+		return nil, err
+	}
+	var rsp kvrpcpb.GetResponse
+	if lock.IsLockedFor(req.Key, uint64(startTS), rsp) {
+		return &rsp, nil
+	}
+	value, err := mxn.GetValue(req.GetKey())
+	if err != nil {
+		return &rsp, err
+	}
+	if len(value) == 0 {
+		rsp.NotFound = true
+		return &rsp, nil
+	}
+	rsp.Value = value
+	return &rsp, nil
 }
 
 func (server *Server) KvPrewrite(_ context.Context, req *kvrpcpb.PrewriteRequest) (*kvrpcpb.PrewriteResponse, error) {

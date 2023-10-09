@@ -198,12 +198,13 @@ func newRaft(c *Config) *Raft {
 		leadTransferee:   0,
 		PendingConfIndex: 0,
 	}
+	lastIndex, _ := c.Storage.LastIndex()
 	for _, peer := range c.peers {
 		rsp.votes[peer] = false
 		rsp.votes[peer+DenyVoteIDOffset] = false
 		rsp.Prs[peer] = &Progress{
-			Match: 0,
-			Next:  max(rsp.RaftLog.LastIndex()+1, hardState.Commit+1),
+			Match: hardState.Commit,
+			Next:  max(rsp.RaftLog.LastIndex()+1, lastIndex) + 1,
 		}
 	}
 	rsp.RaftLog.committed = hardState.Commit
@@ -225,6 +226,8 @@ func newRaft(c *Config) *Raft {
 func (r *Raft) sendAppend(to uint64) bool {
 	// Your Code Here (2A).
 	if r.Prs[to].Next < r.RaftLog.entries[0].Index {
+		/*log.Infof("peerid=%d send snap to %d, r.Prs[to].Next=%d r.RaftLog.entries[0].Index=%d",
+		r.id, to, r.Prs[to].Next, r.RaftLog.entries[0].Index)*/
 		// 需要有个appendEntry回复，更新Next
 		snapshot := pb.Snapshot{}
 		var err error
@@ -635,15 +638,15 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 		Reject:  true,
 	}
 	offset := 0
-	if len(r.RaftLog.entries) == 0 && r.RaftLog.stabled == 0 &&
-		r.RaftLog.applied == 0 && r.RaftLog.committed == 0 && m.Index != 0 {
+	// log.Infof("%d %d %d %d %d", len(r.RaftLog.entries), r.RaftLog.stabled, r.RaftLog.applied, r.RaftLog.committed, m.Index)
+	/*if len(r.RaftLog.entries) == 0 && r.RaftLog.applied > 0 &&  {
 		//
 		log.Infof("peerid=%d is newly added node", r.id)
 		rsp.Reject = false
 		rsp.Index = 0
 		r.msgs = append(r.msgs, rsp)
 		return
-	}
+	}*/
 	if m.Index != 0 || m.LogTerm != 0 {
 		localPrevLogTerm, err := r.RaftLog.Term(m.Index)
 		if err != nil || (m.LogTerm != localPrevLogTerm) {
@@ -804,6 +807,7 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 	r.Vote = 0
 	if m.Commit >= r.RaftLog.committed {
 		r.RaftLog.committed = min(m.Commit, r.RaftLog.LastIndex())
+		r.RaftLog.committed = max(r.RaftLog.committed, r.RaftLog.applied)
 	}
 	r.msgs = append(r.msgs, rsp)
 }
@@ -982,6 +986,15 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 	r.RaftLog.stabled = m.Snapshot.Metadata.Index
 	r.RaftLog.committed = m.Snapshot.Metadata.Index
 	r.RaftLog.applied = m.Snapshot.Metadata.Index
+	rsp := pb.Message{
+		MsgType: pb.MessageType_MsgAppendResponse,
+		To:      m.From,
+		From:    m.To,
+		Term:    r.Term,
+		Reject:  false,
+		Index:   m.Snapshot.Metadata.Index,
+	}
+	r.msgs = append(r.msgs, rsp)
 }
 
 // addNode add a new node to raft group
@@ -1001,6 +1014,9 @@ func (r *Raft) removeNode(id uint64) {
 	delete(r.Prs, id)
 	delete(r.votes, id)
 
+	if r.State != StateLeader {
+		return
+	}
 	N := r.RaftLog.LastIndex()
 	for N >= r.RaftLog.committed+1 {
 		numMatched := 0
