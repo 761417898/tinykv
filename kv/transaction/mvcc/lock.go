@@ -74,6 +74,19 @@ func (lock *Lock) IsLockedFor(key []byte, txnStartTs uint64, resp interface{}) b
 	return false
 }
 
+func (lock *Lock) CheckLocked(key []byte, txnStartTs uint64) bool {
+	if lock == nil {
+		return false
+	}
+	if txnStartTs == TsMax && bytes.Compare(key, lock.Primary) != 0 {
+		return false
+	}
+	if lock.Ts <= txnStartTs {
+		return true
+	}
+	return false
+}
+
 // AllLocksForTxn returns all locks for the current transaction.
 func AllLocksForTxn(txn *MvccTxn) ([]KlPair, error) {
 	var result []KlPair

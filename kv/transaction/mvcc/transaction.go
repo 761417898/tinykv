@@ -96,11 +96,11 @@ func (txn *MvccTxn) GetValue(key []byte) ([]byte, error) {
 		item := iter.Item()
 		foundKey := item.Key()
 		userKey := DecodeUserKey(foundKey)
-		ts := decodeTimestamp(foundKey)
+		commitTS := decodeTimestamp(foundKey)
 		if !bytes.Equal(key, userKey) {
 			break
 		}
-		if txn.StartTS < ts {
+		if txn.StartTS < commitTS {
 			iter.Next()
 			continue
 		}
@@ -108,6 +108,9 @@ func (txn *MvccTxn) GetValue(key []byte) ([]byte, error) {
 		write, err := ParseWrite(writeVal)
 		if err != nil {
 			return nil, err
+		}
+		if write.Kind == WriteKindDelete {
+			return nil, nil
 		}
 		val, err := txn.Reader.GetCF(engine_util.CfDefault, EncodeKey(key, write.StartTS))
 		if err != nil {
